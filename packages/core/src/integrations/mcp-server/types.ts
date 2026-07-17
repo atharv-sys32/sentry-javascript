@@ -147,6 +147,12 @@ export interface ExtraHandlerData {
   request?: {
     ip?: string;
     connection?: { remoteAddress?: string; remotePort?: number };
+    /**
+     * MCP SDK v2 passes a Web-standard `Request` whose `headers` is a `Headers` instance
+     * (accessed via `.get()`); v1/Node shapes expose a plain headers record. Typed loosely
+     * so both are read defensively.
+     */
+    headers?: unknown;
   };
 }
 

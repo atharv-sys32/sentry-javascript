@@ -7,9 +7,19 @@
 
 import { DEBUG_BUILD } from '../../debug-build';
 import { debug } from '../../utils/debug-logger';
-import { fill } from '../../utils/object';
+import { addNonEnumerableProperty, fill } from '../../utils/object';
 import { captureError } from './errorCapture';
 import type { MCPHandler, MCPServerInstance } from './types';
+
+/**
+ * Marks a function as an already-instrumented MCP handler so we never wrap it twice.
+ * @internal
+ */
+const WRAPPED_HANDLER_MARKER = '__sentry_mcp_wrapped__';
+
+function isWrappedHandler(fn: unknown): boolean {
+  return typeof fn === 'function' && !!(fn as unknown as Record<string, unknown>)[WRAPPED_HANDLER_MARKER];
+}
 
 /**
  * Generic function to wrap MCP server method handlers
@@ -41,7 +51,7 @@ function wrapMethodHandler(serverInstance: MCPServerInstance, methodName: keyof 
  * @returns Wrapped handler function
  */
 function createWrappedHandler(originalHandler: MCPHandler, methodName: keyof MCPServerInstance, handlerName: string) {
-  return function (this: unknown, ...handlerArgs: unknown[]): unknown {
+  const wrappedHandler = function (this: unknown, ...handlerArgs: unknown[]): unknown {
     try {
       return createErrorCapturingHandler.call(this, originalHandler, methodName, handlerName, handlerArgs);
     } catch (error) {
@@ -49,6 +59,10 @@ function createWrappedHandler(originalHandler: MCPHandler, methodName: keyof MCP
       return originalHandler.apply(this, handlerArgs);
     }
   };
+
+  addNonEnumerableProperty(wrappedHandler, WRAPPED_HANDLER_MARKER, true);
+
+  return wrappedHandler;
 }
 
 /**
@@ -172,6 +186,44 @@ export function wrapAllMCPHandlers(serverInstance: MCPServerInstance): void {
 }
 
 /**
+ * Wraps a single pre-registered entry's callable property and guards it against
+ * MCP SDK v2 regeneration.
+ *
+ * The SDK stores each entry's callable under a fixed property (`executor` for tools,
+ * `readCallback` for resources/templates, `handler` for prompts) and invokes it by
+ * reading that property at call time, so replacing it in-place instruments the entry.
+ * v2 additionally rebuilds that callable inside `entry.update(...)` whenever the schema
+ * or callback changes (e.g. `registeredTool.update({ paramsSchema })` regenerates
+ * `executor`), which would drop our wrapper — so we also wrap `update` to re-apply
+ * instrumentation to the freshly generated callable.
+ * @internal
+ */
+function wrapRegisteredEntry(
+  entry: Record<string, unknown>,
+  callableProp: string,
+  methodName: keyof MCPServerInstance,
+  name: string,
+): void {
+  if (typeof entry[callableProp] === 'function' && !isWrappedHandler(entry[callableProp])) {
+    entry[callableProp] = createWrappedHandler(entry[callableProp] as MCPHandler, methodName, name);
+  }
+
+  if (typeof entry['update'] === 'function' && !isWrappedHandler(entry['update'])) {
+    fill(entry, 'update', originalUpdate => {
+      const wrappedUpdate = function (this: unknown, ...updateArgs: unknown[]): unknown {
+        const result = (originalUpdate as (...args: unknown[]) => unknown).apply(this, updateArgs);
+        if (typeof entry[callableProp] === 'function' && !isWrappedHandler(entry[callableProp])) {
+          entry[callableProp] = createWrappedHandler(entry[callableProp] as MCPHandler, methodName, name);
+        }
+        return result;
+      };
+      addNonEnumerableProperty(wrappedUpdate, WRAPPED_HANDLER_MARKER, true);
+      return wrappedUpdate;
+    });
+  }
+}
+
+/**
  * Retroactively wraps handlers on tools, resources, and prompts that were registered
  * before `wrapMcpServerWithSentry` was called.
  *
@@ -181,62 +233,33 @@ export function wrapAllMCPHandlers(serverInstance: MCPServerInstance): void {
  * in-place is therefore equivalent to having wrapped the original registration call.
  *
  * NOTE: This intentionally accesses private MCP SDK internals (`_registeredTools` etc.).
- * The properties and their shapes are verified against @modelcontextprotocol/sdk source:
- * https://github.com/modelcontextprotocol/typescript-sdk/blob/2c0c481cb9dbfd15c8613f765c940a5f5bace94d/packages/server/src/server/mcp.ts#L304
- * When upgrading the MCP SDK, re-verify that these internal maps and their callable
- * properties still exist and are invoked directly (not captured by closure at registration).
- * All access is defensive — if a property is absent or not a function we skip silently.
+ * The map names and callable properties are verified against @modelcontextprotocol/sdk v1
+ * (https://github.com/modelcontextprotocol/typescript-sdk/blob/2c0c481cb9dbfd15c8613f765c940a5f5bace94d/packages/server/src/server/mcp.ts#L304)
+ * and @modelcontextprotocol/server v2 (`2.0.0-beta.4`), where they are unchanged and the
+ * callables are still invoked via the mutable property (not captured by closure at
+ * registration). When upgrading the MCP SDK, re-verify these. All access is defensive — if
+ * a property is absent or not a function we skip silently.
  * @internal
  */
 export function wrapExistingHandlers(serverInstance: MCPServerInstance): void {
   const server = serverInstance as unknown as Record<string, unknown>;
 
-  // Tools: MCP SDK calls registeredTool.executor (generated from handler at registration time)
-  const registeredTools = server['_registeredTools'];
-  if (registeredTools && typeof registeredTools === 'object') {
-    for (const [name, tool] of Object.entries(registeredTools as Record<string, Record<string, unknown>>)) {
-      if (typeof tool['executor'] === 'function') {
-        tool['executor'] = createWrappedHandler(tool['executor'] as MCPHandler, 'registerTool', name);
-      }
-    }
-  }
+  const registries: Array<[string, string, keyof MCPServerInstance]> = [
+    // Tools: MCP SDK calls registeredTool.executor (generated from handler at registration time)
+    ['_registeredTools', 'executor', 'registerTool'],
+    // Resources: MCP SDK calls registeredResource.readCallback
+    ['_registeredResources', 'readCallback', 'registerResource'],
+    // Resource templates: MCP SDK calls registeredResourceTemplate.readCallback
+    ['_registeredResourceTemplates', 'readCallback', 'registerResource'],
+    // Prompts: MCP SDK calls registeredPrompt.handler
+    ['_registeredPrompts', 'handler', 'registerPrompt'],
+  ];
 
-  // Resources: MCP SDK calls registeredResource.readCallback
-  const registeredResources = server['_registeredResources'];
-  if (registeredResources && typeof registeredResources === 'object') {
-    for (const [name, resource] of Object.entries(registeredResources as Record<string, Record<string, unknown>>)) {
-      if (typeof resource['readCallback'] === 'function') {
-        resource['readCallback'] = createWrappedHandler(
-          resource['readCallback'] as MCPHandler,
-          'registerResource',
-          name,
-        );
-      }
-    }
-  }
-
-  // Resource templates: MCP SDK calls registeredResourceTemplate.readCallback
-  const registeredResourceTemplates = server['_registeredResourceTemplates'];
-  if (registeredResourceTemplates && typeof registeredResourceTemplates === 'object') {
-    for (const [name, template] of Object.entries(
-      registeredResourceTemplates as Record<string, Record<string, unknown>>,
-    )) {
-      if (typeof template['readCallback'] === 'function') {
-        template['readCallback'] = createWrappedHandler(
-          template['readCallback'] as MCPHandler,
-          'registerResource',
-          name,
-        );
-      }
-    }
-  }
-
-  // Prompts: MCP SDK calls registeredPrompt.handler
-  const registeredPrompts = server['_registeredPrompts'];
-  if (registeredPrompts && typeof registeredPrompts === 'object') {
-    for (const [name, prompt] of Object.entries(registeredPrompts as Record<string, Record<string, unknown>>)) {
-      if (typeof prompt['handler'] === 'function') {
-        prompt['handler'] = createWrappedHandler(prompt['handler'] as MCPHandler, 'registerPrompt', name);
+  for (const [registryName, callableProp, methodName] of registries) {
+    const registry = server[registryName];
+    if (registry && typeof registry === 'object') {
+      for (const [name, entry] of Object.entries(registry as Record<string, Record<string, unknown>>)) {
+        wrapRegisteredEntry(entry, callableProp, methodName, name);
       }
     }
   }

@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as currentScopes from '../../../../src/currentScopes';
+import * as exports from '../../../../src/exports';
 import { wrapMcpServerWithSentry } from '../../../../src/integrations/mcp-server';
 import {
+  buildClientAttributesFromInfo,
+  buildServerAttributesFromInfo,
   buildTransportAttributes,
   extractSessionDataFromInitializeRequest,
   extractSessionDataFromInitializeResponse,
+  getServerAttributes,
   getTransportTypes,
 } from '../../../../src/integrations/mcp-server/sessionExtraction';
 import {
@@ -15,6 +19,10 @@ import {
   storeSessionDataForTransport,
   updateSessionDataForTransport,
 } from '../../../../src/integrations/mcp-server/sessionManagement';
+import {
+  cleanupPendingSpansForTransport,
+  storeSpanForRequest,
+} from '../../../../src/integrations/mcp-server/correlation';
 import { buildMcpServerSpanConfig } from '../../../../src/integrations/mcp-server/spans';
 import {
   wrapTransportError,
@@ -440,6 +448,145 @@ describe('MCP Server Transport Instrumentation', () => {
     });
   });
 
+  describe('Transport error capture', () => {
+    let mockMcpServer: ReturnType<typeof createMockMcpServer>;
+    let wrappedMcpServer: ReturnType<typeof createMockMcpServer>;
+    let mockTransport: ReturnType<typeof createMockTransport>;
+    const captureExceptionSpy = vi.spyOn(exports, 'captureException');
+
+    beforeEach(() => {
+      mockMcpServer = createMockMcpServer();
+      wrappedMcpServer = wrapMcpServerWithSentry(mockMcpServer);
+      mockTransport = createMockTransport();
+    });
+
+    it('wraps onerror and captures the connection error as a transport error', async () => {
+      const originalOnError = mockTransport.onerror;
+      await wrappedMcpServer.connect(mockTransport);
+      expect(mockTransport.onerror).not.toBe(originalOnError);
+
+      const connectionError = new Error('connection reset');
+      mockTransport.onerror?.(connectionError);
+
+      expect(captureExceptionSpy).toHaveBeenCalledWith(
+        connectionError,
+        expect.objectContaining({
+          mechanism: expect.objectContaining({ data: expect.objectContaining({ error_type: 'transport' }) }),
+        }),
+      );
+      // original handler is still invoked
+      expect(originalOnError).toHaveBeenCalledWith(connectionError);
+    });
+
+    it('captures a JSON-RPC error response in the server error code range (-32000..-32099)', async () => {
+      await wrappedMcpServer.connect(mockTransport);
+
+      await mockTransport.send?.({
+        jsonrpc: '2.0',
+        id: 'req-1',
+        error: { code: -32050, message: 'custom server error' },
+      } as any);
+
+      expect(captureExceptionSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'JsonRpcError_-32050', message: 'custom server error' }),
+        expect.objectContaining({
+          mechanism: expect.objectContaining({ data: expect.objectContaining({ error_type: 'protocol' }) }),
+        }),
+      );
+    });
+
+    it('does not capture a JSON-RPC error outside the server error range (e.g. -32700 parse error)', async () => {
+      await wrappedMcpServer.connect(mockTransport);
+
+      await mockTransport.send?.({
+        jsonrpc: '2.0',
+        id: 'req-2',
+        error: { code: -32700, message: 'Parse error' },
+      } as any);
+
+      expect(captureExceptionSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Pending span cleanup', () => {
+    function makeMockSpan() {
+      return { setStatus: vi.fn(), end: vi.fn() } as unknown as Parameters<typeof storeSpanForRequest>[2];
+    }
+
+    it('cancels and ends pending spans for a stateful transport (sessionId path)', () => {
+      const transport = createMockTransport();
+      transport.sessionId = 'cleanup-stateful-session';
+      const span = makeMockSpan();
+      storeSpanForRequest(transport, 'req-1', span, 'tools/call');
+
+      cleanupPendingSpansForTransport(transport);
+
+      expect(span.setStatus).toHaveBeenCalledWith({ code: 2, message: 'cancelled' });
+      expect(span.end).toHaveBeenCalled();
+    });
+
+    it('cancels and ends pending spans for a stateless transport (no sessionId, WeakMap fallback)', () => {
+      // No sessionId -> exercises the statelessSpanMap branch (the direction MCP v2 is moving)
+      const transport = { onmessage: () => {}, send: async () => {} } as Parameters<typeof storeSpanForRequest>[0];
+      const span = makeMockSpan();
+      storeSpanForRequest(transport, 'req-1', span, 'tools/call');
+
+      cleanupPendingSpansForTransport(transport);
+
+      expect(span.setStatus).toHaveBeenCalledWith({ code: 2, message: 'cancelled' });
+      expect(span.end).toHaveBeenCalled();
+    });
+
+    it('is a no-op when there are no pending spans for the transport', () => {
+      const transport = { onmessage: () => {}, send: async () => {} } as Parameters<typeof storeSpanForRequest>[0];
+      expect(() => cleanupPendingSpansForTransport(transport)).not.toThrow();
+    });
+  });
+
+  describe('Server/client attribute builders', () => {
+    it('buildServerAttributesFromInfo emits name, title and version', () => {
+      expect(buildServerAttributesFromInfo({ name: 'srv', title: 'My Server', version: '3.1.0' })).toEqual({
+        'mcp.server.name': 'srv',
+        'mcp.server.title': 'My Server',
+        'mcp.server.version': '3.1.0',
+      });
+    });
+
+    it('buildServerAttributesFromInfo omits absent fields and handles undefined', () => {
+      expect(buildServerAttributesFromInfo({ name: 'srv' })).toEqual({ 'mcp.server.name': 'srv' });
+      expect(buildServerAttributesFromInfo(undefined)).toEqual({});
+    });
+
+    it('buildClientAttributesFromInfo emits name, title and version', () => {
+      expect(buildClientAttributesFromInfo({ name: 'cli', title: 'My Client', version: '1.2.3' })).toEqual({
+        'mcp.client.name': 'cli',
+        'mcp.client.title': 'My Client',
+        'mcp.client.version': '1.2.3',
+      });
+    });
+
+    it('getServerAttributes reads stored serverInfo (title/version) for a transport', () => {
+      const transport = createMockTransport();
+      transport.sessionId = 'server-info-session';
+      updateSessionDataForTransport(transport, {
+        serverInfo: { name: 'srv', title: 'Titled', version: '9.9.9' },
+      });
+
+      expect(getServerAttributes(transport)).toEqual({
+        'mcp.server.name': 'srv',
+        'mcp.server.title': 'Titled',
+        'mcp.server.version': '9.9.9',
+      });
+    });
+
+    it('getServerAttributes returns an empty object when no server info is stored', () => {
+      const transport = createMockTransport();
+      // Unique sessionId so this transport can't pick up session data stored by other tests
+      transport.sessionId = 'no-server-info-session';
+      expect(getServerAttributes(transport)).toEqual({});
+    });
+  });
+
   describe('Session Management', () => {
     let mockTransport: ReturnType<typeof createMockTransport>;
 
@@ -649,6 +796,43 @@ describe('MCP Server Transport Instrumentation', () => {
       const attributes = buildTransportAttributes(transport);
 
       expect(attributes['mcp.session.id']).toBeUndefined();
+    });
+  });
+
+  describe('buildTransportAttributes client address extraction', () => {
+    it('uses requestInfo.remoteAddress/remotePort (SDK v1 shape)', () => {
+      const transport = createMockTransport();
+      const attributes = buildTransportAttributes(transport, {
+        requestInfo: { remoteAddress: '10.0.0.1', remotePort: 4321 },
+      });
+
+      expect(attributes['client.address']).toBe('10.0.0.1');
+      expect(attributes['client.port']).toBe(4321);
+    });
+
+    it('falls back to x-forwarded-for from a Web `Headers` object (SDK v2 shape)', () => {
+      const transport = createMockTransport();
+      const headers = new Headers({ 'x-forwarded-for': '203.0.113.7, 70.41.3.18' });
+      const attributes = buildTransportAttributes(transport, { request: { headers } });
+
+      // First hop is the originating client
+      expect(attributes['client.address']).toBe('203.0.113.7');
+    });
+
+    it('reads x-forwarded-for from a plain Node headers record', () => {
+      const transport = createMockTransport();
+      const attributes = buildTransportAttributes(transport, {
+        request: { headers: { 'x-forwarded-for': '198.51.100.9' } },
+      });
+
+      expect(attributes['client.address']).toBe('198.51.100.9');
+    });
+
+    it('omits client.address when no address hint is available', () => {
+      const transport = createMockTransport();
+      const attributes = buildTransportAttributes(transport, { request: { headers: new Headers() } });
+
+      expect(attributes['client.address']).toBeUndefined();
     });
   });
 

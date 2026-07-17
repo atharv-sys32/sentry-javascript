@@ -238,6 +238,27 @@ describe('MCP Server Semantic Conventions', () => {
       );
     });
 
+    it('should JSON-stringify non-string logging data', async () => {
+      await wrappedMcpServer.connect(mockTransport);
+
+      const loggingNotification = {
+        jsonrpc: '2.0',
+        method: 'notifications/message',
+        params: {
+          level: 'error',
+          data: { code: 500, detail: 'boom' },
+        },
+      };
+
+      mockTransport.onmessage?.(loggingNotification, {});
+
+      const call = startSpanSpy.mock.calls.find(c => c[0]?.name === 'notifications/message');
+      expect(call?.[0]?.attributes).toMatchObject({
+        'mcp.logging.data_type': 'object',
+        'mcp.logging.message': JSON.stringify({ code: 500, detail: 'boom' }),
+      });
+    });
+
     it('should create spans with attributes for other notification types', async () => {
       await wrappedMcpServer.connect(mockTransport);
 

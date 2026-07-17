@@ -85,6 +85,49 @@ export function createMockMcpServerWithPreregisteredHandlers() {
 }
 
 /**
+ * Create a mock MCP server (v2 shape) whose pre-registered entries expose an `update` method
+ * that regenerates the underlying callable to a fresh, *unwrapped* function — mirroring how
+ * `@modelcontextprotocol/server` v2 rebuilds `executor`/`readCallback`/`handler` when
+ * `registeredTool.update(...)` changes a schema or callback. The regenerated callables reject,
+ * so tests can assert that Sentry re-wraps them (capture still fires after `update`).
+ */
+export function createMockMcpServerV2WithUpdatableHandlers() {
+  const makeRejecting = (message: string): ReturnType<typeof vi.fn> => vi.fn().mockRejectedValue(new Error(message));
+
+  const tool: Record<string, unknown> = { executor: makeRejecting('tool boom') };
+  tool.update = vi.fn(() => {
+    tool.executor = makeRejecting('tool boom');
+  });
+
+  const resource: Record<string, unknown> = { readCallback: makeRejecting('resource boom') };
+  resource.update = vi.fn(() => {
+    resource.readCallback = makeRejecting('resource boom');
+  });
+
+  const template: Record<string, unknown> = { readCallback: makeRejecting('template boom') };
+  template.update = vi.fn(() => {
+    template.readCallback = makeRejecting('template boom');
+  });
+
+  const prompt: Record<string, unknown> = { handler: makeRejecting('prompt boom') };
+  prompt.update = vi.fn(() => {
+    prompt.handler = makeRejecting('prompt boom');
+  });
+
+  return {
+    registerTool: vi.fn(),
+    registerResource: vi.fn(),
+    registerPrompt: vi.fn(),
+    connect: vi.fn().mockResolvedValue(undefined),
+    server: { setRequestHandler: vi.fn() },
+    _registeredTools: { 'my-tool': tool },
+    _registeredResources: { 'res://my-resource': resource },
+    _registeredResourceTemplates: { 'my-template': template },
+    _registeredPrompts: { 'my-prompt': prompt },
+  };
+}
+
+/**
  * Create a mock MCP server instance using the new register* API (SDK >=1.x / 2.x)
  */
 export function createMockMcpServerWithRegisterApi() {

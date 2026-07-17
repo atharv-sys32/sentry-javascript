@@ -1,12 +1,14 @@
 import { expect, test } from '@playwright/test';
-import { waitForTransaction } from '@sentry-internal/test-utils';
+import { waitForError, waitForTransaction } from '@sentry-internal/test-utils';
 import { Client } from '@modelcontextprotocol/client';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 
-test('Should record transactions for MCP handlers using @modelcontextprotocol/sdk v2 (register* API)', async ({
-  baseURL,
-}) => {
-  const transport = new StreamableHTTPClientTransport(new URL(`${baseURL}/mcp`));
+/**
+ * Runs the full MCP handler flow (initialize + tool/resource/prompt + error tool) against a
+ * server mounted at `path` and asserts the emitted transactions and the captured handler error.
+ */
+async function runMcpFlow(baseURL: string | undefined, path: string, serverName: string): Promise<void> {
+  const transport = new StreamableHTTPClientTransport(new URL(`${baseURL}${path}`));
 
   const client = new Client({
     name: 'test-client-v2',
@@ -14,7 +16,10 @@ test('Should record transactions for MCP handlers using @modelcontextprotocol/sd
   });
 
   const initializeTransactionPromise = waitForTransaction('node-express-mcp-v2', transactionEvent => {
-    return transactionEvent.transaction === 'initialize';
+    return (
+      transactionEvent.transaction === 'initialize' &&
+      transactionEvent.contexts?.trace?.data?.['mcp.server.name'] === serverName
+    );
   });
 
   await client.connect(transport);
@@ -25,13 +30,16 @@ test('Should record transactions for MCP handlers using @modelcontextprotocol/sd
     expect(initializeTransaction.contexts?.trace?.op).toEqual('mcp.server');
     expect(initializeTransaction.contexts?.trace?.data?.['mcp.method.name']).toEqual('initialize');
     expect(initializeTransaction.contexts?.trace?.data?.['mcp.client.name']).toEqual('test-client-v2');
-    expect(initializeTransaction.contexts?.trace?.data?.['mcp.server.name']).toEqual('Echo-V2');
+    expect(initializeTransaction.contexts?.trace?.data?.['mcp.server.name']).toEqual(serverName);
     expect(initializeTransaction.contexts?.trace?.data?.['mcp.transport']).toMatch(/StreamableHTTPServerTransport/);
   });
 
   await test.step('registerTool handler', async () => {
     const toolTransactionPromise = waitForTransaction('node-express-mcp-v2', transactionEvent => {
-      return transactionEvent.transaction === 'tools/call echo';
+      return (
+        transactionEvent.transaction === 'tools/call echo' &&
+        transactionEvent.contexts?.trace?.data?.['mcp.server.name'] === serverName
+      );
     });
 
     const toolResult = await client.callTool({
@@ -61,7 +69,10 @@ test('Should record transactions for MCP handlers using @modelcontextprotocol/sd
 
   await test.step('registerResource handler', async () => {
     const resourceTransactionPromise = waitForTransaction('node-express-mcp-v2', transactionEvent => {
-      return transactionEvent.transaction === 'resources/read echo://foobar';
+      return (
+        transactionEvent.transaction === 'resources/read echo://foobar' &&
+        transactionEvent.contexts?.trace?.data?.['mcp.server.name'] === serverName
+      );
     });
 
     const resourceResult = await client.readResource({
@@ -80,7 +91,10 @@ test('Should record transactions for MCP handlers using @modelcontextprotocol/sd
 
   await test.step('registerPrompt handler', async () => {
     const promptTransactionPromise = waitForTransaction('node-express-mcp-v2', transactionEvent => {
-      return transactionEvent.transaction === 'prompts/get echo';
+      return (
+        transactionEvent.transaction === 'prompts/get echo' &&
+        transactionEvent.contexts?.trace?.data?.['mcp.server.name'] === serverName
+      );
     });
 
     const promptResult = await client.getPrompt({
@@ -108,9 +122,22 @@ test('Should record transactions for MCP handlers using @modelcontextprotocol/sd
     expect(promptTransaction.contexts?.trace?.data?.['mcp.method.name']).toEqual('prompts/get');
   });
 
-  await test.step('error tool sets span status to internal_error', async () => {
+  await test.step('error tool captures error and sets span status to internal_error', async () => {
     const toolTransactionPromise = waitForTransaction('node-express-mcp-v2', transactionEvent => {
-      return transactionEvent.transaction === 'tools/call always-error';
+      return (
+        transactionEvent.transaction === 'tools/call always-error' &&
+        transactionEvent.contexts?.trace?.data?.['mcp.server.name'] === serverName
+      );
+    });
+
+    // The handler wrapper reports the thrown error as a Sentry event with an MCP mechanism.
+    // This is the signal unique to the handler wrapping (transport instrumentation only sets
+    // span status), so it proves the wrapped handler ran for this route.
+    const errorEventPromise = waitForError('node-express-mcp-v2', errorEvent => {
+      return (
+        errorEvent.exception?.values?.[0]?.value === 'intentional error for span status testing' &&
+        errorEvent.exception?.values?.[0]?.mechanism?.type === 'auto.ai.mcp_server'
+      );
     });
 
     try {
@@ -123,7 +150,21 @@ test('Should record transactions for MCP handlers using @modelcontextprotocol/sd
     expect(toolTransaction).toBeDefined();
     expect(toolTransaction.contexts?.trace?.op).toEqual('mcp.server');
     expect(toolTransaction.contexts?.trace?.status).toEqual('internal_error');
+
+    const errorEvent = await errorEventPromise;
+    expect(errorEvent.exception?.values?.[0]?.mechanism?.data?.error_type).toEqual('tool_execution');
+    expect(errorEvent.exception?.values?.[0]?.mechanism?.data?.tool_name).toEqual('always-error');
   });
 
   await client.close();
+}
+
+test('Should record transactions for MCP handlers wrapped before registration (register* API)', async ({ baseURL }) => {
+  await runMcpFlow(baseURL, '/mcp', 'Echo-V2');
+});
+
+test('Should record transactions for MCP handlers wrapped after registration (retroactive wrapping)', async ({
+  baseURL,
+}) => {
+  await runMcpFlow(baseURL, '/mcp-retro', 'Echo-V2-Retro');
 });

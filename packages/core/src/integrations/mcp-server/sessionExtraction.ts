@@ -170,6 +170,33 @@ export function buildServerAttributesFromInfo(serverInfo?: PartyInfo): Record<st
 }
 
 /**
+ * Reads the originating client IP from an `x-forwarded-for` header.
+ *
+ * MCP SDK v2 hands `onmessage` a Web-standard `Request` (headers accessed via `.get()`)
+ * instead of the v1 `requestInfo`/Node request, so socket-level remote address is no longer
+ * available — the forwarded header is the only remaining client hint. Handles both the Web
+ * `Headers` shape and a plain Node headers record.
+ * @internal
+ */
+function getForwardedClientAddress(headers: unknown): string | undefined {
+  if (!headers || typeof headers !== 'object') {
+    return undefined;
+  }
+
+  const getFn = (headers as { get?: unknown }).get;
+  const rawValue =
+    typeof getFn === 'function'
+      ? (getFn as (name: string) => unknown).call(headers, 'x-forwarded-for')
+      : (headers as Record<string, unknown>)['x-forwarded-for'];
+
+  if (typeof rawValue === 'string' && rawValue.length > 0) {
+    return rawValue.split(',')[0]?.trim() || undefined;
+  }
+
+  return undefined;
+}
+
+/**
  * Extracts client connection info from extra handler data
  * @param extra - Extra handler data containing connection info
  * @returns Client address and port information
@@ -183,7 +210,8 @@ export function extractClientInfo(extra: ExtraHandlerData): {
       extra?.requestInfo?.remoteAddress ||
       extra?.clientAddress ||
       extra?.request?.ip ||
-      extra?.request?.connection?.remoteAddress,
+      extra?.request?.connection?.remoteAddress ||
+      getForwardedClientAddress(extra?.request?.headers),
     port: extra?.requestInfo?.remotePort || extra?.clientPort || extra?.request?.connection?.remotePort,
   };
 }
