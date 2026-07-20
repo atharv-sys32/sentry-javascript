@@ -16,7 +16,6 @@
   ```
 
   It emits:
-
   - `browser.bfcache.navigation` — a counter split by outcome (`hit`/`miss`) and navigation type.
   - `browser.bfcache.not_restored` — a counter of the (Chromium-only) `notRestoredReasons` for a miss.
   - `browser.bfcache.reload.duration` — a distribution of how expensive the fallback reload was on a miss.
