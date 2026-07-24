@@ -14,6 +14,7 @@ import {
   markSpanForOtelSourceInference,
   spanSourceWasExplicitlySet,
 } from '../../../src/tracing/utils';
+import { withStaticSpan } from '../../../src/tracing/spans/beforeSendSpan';
 import type { Envelope } from '../../../src/types/envelope';
 import type { SpanJSON } from '../../../src/types/span';
 import { spanToJSON, TRACE_FLAG_NONE, TRACE_FLAG_SAMPLED } from '../../../src/utils/spanUtils';
@@ -272,7 +273,7 @@ describe('SentrySpan', () => {
     });
 
     test('sends the span if `beforeSendSpan` does not modify the span', () => {
-      const beforeSendSpan = vi.fn(span => span);
+      const beforeSendSpan = withStaticSpan(vi.fn(span => span));
       const client = new TestClient(
         getDefaultTestClientOptions({
           dsn: 'https://username@domain/123',
@@ -295,10 +296,10 @@ describe('SentrySpan', () => {
       expect(mockSend).toHaveBeenCalled();
     });
 
-    test('ignores a non-streamed `beforeSendSpan` for standalone spans', () => {
-      // Standalone spans are sent as v2 streamed spans, which only honor a `beforeSendSpan` wrapped
-      // with `withStreamedSpan`. A plain callback is ignored, so the span is sent unmodified.
-      const beforeSendSpan = vi.fn(() => null as unknown as SpanJSON);
+    test('ignores a static `beforeSendSpan` for standalone spans', () => {
+      // Standalone spans are sent as v2 streamed spans, which only honor an unwrapped (streamed)
+      // `beforeSendSpan`. A callback wrapped with `withStaticSpan` is ignored, so the span is sent unmodified.
+      const beforeSendSpan = withStaticSpan(vi.fn(() => null as unknown as SpanJSON));
       const client = new TestClient(
         getDefaultTestClientOptions({
           dsn: 'https://username@domain/123',

@@ -160,6 +160,8 @@ export {
   unleashIntegration,
   metrics,
   spanStreamingIntegration,
+  withStaticSpan,
+  // eslint-disable-next-line typescript/no-deprecated
   withStreamedSpan,
 } from '@sentry/node';
 
