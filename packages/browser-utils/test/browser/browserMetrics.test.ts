@@ -280,7 +280,7 @@ describe('_addMeasureSpans', () => {
         expect.objectContaining({ description: 'measure-pass', op: 'measure' }),
         expect.objectContaining({ description: 'mark-pass', op: 'mark' }),
         // name matches but type is not (mark|measure) => should not be ignored
-        expect.objectContaining({ description: 'mark-ignore', op: 'paint' }),
+        expect.objectContaining({ description: 'mark-ignore', op: 'browser.paint' }),
       ]),
     );
   });

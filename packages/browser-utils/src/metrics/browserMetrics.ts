@@ -29,6 +29,7 @@ import { getNavigationEntry } from './web-vitals/lib/getNavigationEntry';
 import { getVisibilityWatcher } from './web-vitals/lib/getVisibilityWatcher';
 import { DEBUG_BUILD } from '../debug-build';
 import { URL_FULL } from '@sentry/conventions/attributes';
+import { BROWSER_BROWSER_PAINT_SPAN_OP } from '@sentry/conventions/op';
 interface NavigatorNetworkInformation {
   readonly connection?: NetworkInformation;
 }
@@ -561,7 +562,7 @@ export function _addMeasureSpans(
   if (measureStartTimestamp <= measureEndTimestamp) {
     startAndEndSpan(span, measureStartTimestamp, measureEndTimestamp, {
       name: entry.name,
-      op: entry.entryType,
+      op: entry.entryType === 'paint' ? BROWSER_BROWSER_PAINT_SPAN_OP : entry.entryType,
       attributes,
     });
   }
