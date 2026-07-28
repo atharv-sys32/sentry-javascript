@@ -174,7 +174,7 @@ export {
   growthbookIntegration,
   spanStreamingIntegration,
   withStaticSpan,
-  // eslint-disable-next-line typescript/no-deprecated
+  // oxlint-disable-next-line typescript/no-deprecated
   withStreamedSpan,
   metrics,
 } from '@sentry/node';
