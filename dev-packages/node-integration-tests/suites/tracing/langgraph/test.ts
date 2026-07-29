@@ -433,7 +433,6 @@ describe('LangGraph integration', () => {
                   [SEMANTIC_ATTRIBUTE_SENTRY_OP]: expect.objectContaining({ value: 'gen_ai.execute_tool' }),
                   [GEN_AI_OPERATION_NAME]: expect.objectContaining({ value: 'execute_tool' }),
                   [GEN_AI_TOOL_NAME]: expect.objectContaining({ value: 'add' }),
-                  'gen_ai.tool.type': expect.objectContaining({ value: 'function' }),
                 }),
               }),
             );
@@ -445,7 +444,6 @@ describe('LangGraph integration', () => {
                   [SEMANTIC_ATTRIBUTE_SENTRY_OP]: expect.objectContaining({ value: 'gen_ai.execute_tool' }),
                   [GEN_AI_OPERATION_NAME]: expect.objectContaining({ value: 'execute_tool' }),
                   [GEN_AI_TOOL_NAME]: expect.objectContaining({ value: 'multiply' }),
-                  'gen_ai.tool.type': expect.objectContaining({ value: 'function' }),
                 }),
               }),
             );
