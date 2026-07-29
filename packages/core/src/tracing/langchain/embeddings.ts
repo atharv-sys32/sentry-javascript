@@ -14,6 +14,7 @@ import {
   GEN_AI_REQUEST_ENCODING_FORMAT_ATTRIBUTE,
 } from '../ai/gen-ai-attributes';
 import { resolveAIRecordingOptions } from '../ai/utils';
+import { stringify } from '../../utils/string';
 import { LANGCHAIN_ORIGIN } from './constants';
 import type { LangChainOptions } from './types';
 
@@ -73,7 +74,7 @@ export function _INTERNAL_getLangChainEmbeddingsSpanOptions(
   const modelName = attributes[GEN_AI_REQUEST_MODEL] || 'unknown';
 
   if (recordInputs && input != null) {
-    attributes[GEN_AI_EMBEDDINGS_INPUT] = typeof input === 'string' ? input : JSON.stringify(input);
+    attributes[GEN_AI_EMBEDDINGS_INPUT] = stringify(input, String);
   }
 
   return {

@@ -4,6 +4,7 @@ import { SEMANTIC_ATTRIBUTE_SENTRY_OP, SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN } from '
 import { SPAN_STATUS_ERROR } from '../../tracing';
 import { startSpanManual } from '../../tracing/trace';
 import type { Span, SpanAttributeValue } from '../../types/span';
+import { stringify } from '../../utils/string';
 import {
   GEN_AI_OPERATION_NAME,
   GEN_AI_REQUEST_MODEL,
@@ -327,7 +328,7 @@ export function createLangChainCallbackHandler(options: LangChainOptions = {}): 
           const content =
             outputObj && typeof outputObj === 'object' && 'content' in outputObj ? outputObj.content : output;
           span.setAttributes({
-            [GEN_AI_TOOL_CALL_RESULT]: typeof content === 'string' ? content : JSON.stringify(content),
+            [GEN_AI_TOOL_CALL_RESULT]: stringify(content, String),
           });
         }
         exitSpan(runId);
