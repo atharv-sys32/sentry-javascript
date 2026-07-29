@@ -11,7 +11,7 @@ import {
   SEMANTIC_ATTRIBUTE_USER_IP_ADDRESS,
   SEMANTIC_ATTRIBUTE_USER_USERNAME,
 } from '../../semanticAttributes';
-import type { SerializedStreamedSpan, Span, StreamedSpanJSON } from '../../types/span';
+import type { SerializedStreamedSpan, Span, SpanJSON, StreamedSpanJSON } from '../../types/span';
 import { getCombinedScopeData } from '../../utils/scopeData';
 import {
   INTERNAL_getSegmentSpan,
@@ -20,8 +20,10 @@ import {
   streamedSpanJsonToSerializedSpan,
 } from '../../utils/spanUtils';
 import { getCapturedScopesOnSpan } from '../utils';
-import { isStreamedBeforeSendSpanCallback } from './beforeSendSpan';
+import { isStaticBeforeSendSpanCallback, isStreamedBeforeSendSpanCallback } from './beforeSendSpan';
+import { hasSpanStreamingEnabled } from './hasSpanStreamingEnabled';
 import { scopeContextsToSpanAttributes } from './scopeContextAttributes';
+import { spanJsonToStreamedSpanJson, streamedSpanJsonToSpanJson } from './spanJsonToStreamedSpan';
 import { DEFAULT_ENVIRONMENT } from '../../constants';
 import {
   SENTRY_SDK_NAME,
@@ -73,11 +75,7 @@ export function captureSpan(span: Span, client: Client): SerializedStreamedSpanW
   // This also invokes the `processSpan` hook of all integrations
   client.emit('processSpan', spanJSON);
 
-  const { beforeSendSpan } = client.getOptions();
-  const processedSpan =
-    beforeSendSpan && isStreamedBeforeSendSpanCallback(beforeSendSpan)
-      ? applyBeforeSendSpanCallback(spanJSON, beforeSendSpan)
-      : spanJSON;
+  const processedSpan = applyBeforeSendSpan(spanJSON, client);
 
   const spanNameSource = processedSpan.attributes?.[SEMANTIC_ATTRIBUTE_SENTRY_SOURCE];
   if (spanJSON.is_segment && spanNameSource) {
@@ -153,12 +151,38 @@ function applyCommonSpanAttributes(
 }
 
 /**
+ * Apply the configured `beforeSendSpan` callback to a span JSON, in whichever span format the
+ * callback expects.
+ *
+ * Standalone spans (INP web vital spans) are sent as v2 spans even when the static trace
+ * lifecycle is configured, so a `withStaticSpan` callback would otherwise never see them. For those,
+ * the span is converted to the v1 format for the callback and converted back afterwards.
+ *
+ * TODO(v12): Remove the v1 and static callback conversion shenanigans once we drop transactions.
+ */
+function applyBeforeSendSpan(span: StreamedSpanJSON, client: Client): StreamedSpanJSON {
+  const { beforeSendSpan } = client.getOptions();
+
+  if (!beforeSendSpan) {
+    return span;
+  }
+
+  if (hasSpanStreamingEnabled(client)) {
+    return isStreamedBeforeSendSpanCallback(beforeSendSpan) ? applyBeforeSendSpanCallback(span, beforeSendSpan) : span;
+  }
+
+  return isStaticBeforeSendSpanCallback(beforeSendSpan)
+    ? spanJsonToStreamedSpanJson(applyBeforeSendSpanCallback(streamedSpanJsonToSpanJson(span), beforeSendSpan))
+    : span;
+}
+
+/**
  * Apply a user-provided beforeSendSpan callback to a span JSON.
  */
-export function applyBeforeSendSpanCallback(
-  span: StreamedSpanJSON,
-  beforeSendSpan: (span: StreamedSpanJSON) => StreamedSpanJSON,
-): StreamedSpanJSON {
+export function applyBeforeSendSpanCallback<T extends StreamedSpanJSON | SpanJSON>(
+  span: T,
+  beforeSendSpan: (span: T) => T,
+): T {
   const modifedSpan = beforeSendSpan(span);
   if (!modifedSpan) {
     showSpanDropWarning();
