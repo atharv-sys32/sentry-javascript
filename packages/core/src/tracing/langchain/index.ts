@@ -8,8 +8,8 @@ import type { Span, SpanAttributeValue } from '../../types/span';
 import {
   GEN_AI_OPERATION_NAME,
   GEN_AI_REQUEST_MODEL,
+  GEN_AI_TOOL_CALL_ARGUMENTS,
   GEN_AI_TOOL_DEFINITIONS,
-  GEN_AI_TOOL_INPUT,
   GEN_AI_TOOL_NAME,
   GEN_AI_TOOL_OUTPUT,
 } from '@sentry/conventions/attributes';
@@ -299,7 +299,7 @@ export function createLangChainCallbackHandler(options: LangChainOptions = {}): 
       };
 
       if (recordInputs) {
-        attributes[GEN_AI_TOOL_INPUT] = input;
+        attributes[GEN_AI_TOOL_CALL_ARGUMENTS] = input;
       }
 
       startSpanManual(
