@@ -72,11 +72,24 @@ function builtFromSource(builtConfigPath: string, sourceConfigPath: string): boo
   }
 }
 
+type RetryOptions = { maxRetries?: number; retryDelayMs?: number };
+
 // Wrangler can report "Ready" before it can actually handle requests.
 // This retries fetch on connection errors and transient 500 responses to handle this race condition.
 // The budget (maxRetries * retryDelayMs) must cover the "ready-but-not-serving" window, which can be
 // several seconds on a loaded CI runner — hence a generous default.
-async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 25, retryDelayMs = 200): Promise<Response> {
+//
+// A request that expects the worker to fail must opt out of retrying (`maxRetries: 1`). Its 500 — or
+// reset connection, since an uncaught Durable Object exception tears down the socket rather than
+// answering — is indistinguishable from the transient kind, so retrying just re-invokes a handler that
+// throws again, costing the full budget and flooding the output with duplicate stack traces. Nothing is
+// lost by giving up immediately: such tests assert on the envelopes the failure produces, so a worker
+// that is not serving yet fails them on a missing envelope instead of passing on a coincidental error.
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  { maxRetries = 25, retryDelayMs = 200 }: RetryOptions = {},
+): Promise<Response> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const res = await fetch(url, init);
@@ -429,7 +442,7 @@ export function createRunner(...paths: string[]) {
           if (process.env.DEBUG) log('making request', method, url, headers, body);
 
           try {
-            const res = await fetchWithRetry(url, { headers, method, body });
+            const res = await fetchWithRetry(url, { headers, method, body }, expectError ? { maxRetries: 1 } : {});
 
             if (!res.ok) {
               if (!expectError) {
