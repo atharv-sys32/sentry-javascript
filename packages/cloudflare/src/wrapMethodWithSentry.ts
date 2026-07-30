@@ -4,7 +4,6 @@ import {
   isObjectLike,
   captureException,
   continueTrace,
-  getClient,
   isThenable,
   type Scope,
   SEMANTIC_ATTRIBUTE_SENTRY_OP,
@@ -12,7 +11,6 @@ import {
   startNewTrace as startNewTraceCore,
   startSpan,
   withIsolationScope,
-  withScope,
 } from '@sentry/core';
 import type { CloudflareOptions } from './client';
 import type { ExecutionContextCompat } from './executionContext';
@@ -112,10 +110,12 @@ export function wrapMethodWithSentry<T extends OriginalMethod>(
             rpcMeta = extracted.rpcMeta;
           }
 
-          // For startNewTrace, always use withIsolationScope to ensure a fresh scope
-          // Otherwise, use existing client's scope or isolation scope
-          const currentClient = getClient();
-          const sentryWithScope = startNewTrace ? withIsolationScope : currentClient ? withScope : withIsolationScope;
+          // Fork the isolation scope, never just the current scope. `setUser`/`setTag` write to
+          // the isolation scope, and a Durable Object's isolation scope outlives the invocation
+          // that touched it — so forking only the current scope let one invocation's user and tags
+          // reappear on the next invocation's events in the same isolate. Forking clones, so
+          // request data set by an enclosing wrapper is still inherited.
+          const sentryWithScope = withIsolationScope;
 
           const wrappedFunction = (scope: Scope): unknown | Promise<unknown> => {
             // In certain situations, the passed context can become undefined.
@@ -123,6 +123,9 @@ export function wrapMethodWithSentry<T extends OriginalMethod>(
             // see: https://github.com/getsentry/sentry-javascript/issues/13217
             const context: typeof wrapperOptions.context | undefined = wrapperOptions.context;
 
+            // Use the un-instrumented waitUntil for teardown — the flush lock wraps
+            // waitUntil to track pending work, so registering the flush through the
+            // wrapped version would deadlock the lock against itself.
             // see: https://github.com/getsentry/sentry-javascript/issues/22328
             const waitUntil = context
               ? getOriginalWaitUntil(context as ExecutionContextCompat)?.bind(context)

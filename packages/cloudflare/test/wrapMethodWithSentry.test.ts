@@ -773,3 +773,140 @@ describe('wrapMethodWithSentry waitUntil teardown (hibernation regression)', () 
     expect(mocks.flush).toHaveBeenCalled();
   });
 });
+
+describe('wrapMethodWithSentry DO context teardown', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('DO async method registers teardown via waitUntil', async () => {
+    const waitUntil = vi.fn();
+    const context = {
+      waitUntil,
+      storage: {} as any,
+      originalStorage: undefined,
+    } as any;
+
+    const handler = vi.fn().mockResolvedValue('async-result');
+    const options = {
+      origin: 'auto.faas.cloudflare.durable_object',
+      options: {},
+      context,
+    };
+
+    const wrapped = wrapMethodWithSentry(options, handler);
+    const result = wrapped();
+
+    expect(result).toBeInstanceOf(Promise);
+    await expect(result).resolves.toBe('async-result');
+
+    // Teardown is registered via waitUntil (with an already-started teardown promise)
+    expect(waitUntil).toHaveBeenCalled();
+    // Flush is called as part of that teardown
+    expect(mocks.flush).toHaveBeenCalledWith(2000);
+  });
+
+  it('DO sync method preserves sync return and registers teardown via waitUntil', () => {
+    const waitUntil = vi.fn();
+    const context = {
+      waitUntil,
+      storage: {} as any,
+      originalStorage: undefined,
+    } as any;
+
+    const handler = vi.fn().mockReturnValue('sync-result');
+    const options = {
+      origin: 'auto.faas.cloudflare.durable_object',
+      options: {},
+      context,
+    };
+
+    const wrapped = wrapMethodWithSentry(options, handler);
+    const result = wrapped();
+
+    // Sync behavior is preserved
+    expect(result).not.toBeInstanceOf(Promise);
+    expect(result).toBe('sync-result');
+    // Teardown is registered via waitUntil
+    expect(waitUntil).toHaveBeenCalled();
+    // Flush is called as part of that teardown
+    expect(mocks.flush).toHaveBeenCalledWith(2000);
+  });
+
+  it('DO method with no waitUntil available works gracefully', async () => {
+    const context = {
+      storage: {} as any,
+      originalStorage: undefined,
+    } as any;
+
+    const handler = vi.fn().mockResolvedValue('result');
+    const options = {
+      origin: 'auto.faas.cloudflare.durable_object',
+      options: {},
+      context,
+    };
+
+    const wrapped = wrapMethodWithSentry(options, handler);
+
+    // Should not throw
+    await expect(wrapped()).resolves.toBe('result');
+    // Without waitUntil there is no teardown hook, so the boundary flush does not run
+    expect(mocks.flush).not.toHaveBeenCalled();
+  });
+
+  it('DO async method error path registers teardown via waitUntil', async () => {
+    const waitUntil = vi.fn();
+    const context = {
+      waitUntil,
+      storage: {} as any,
+      originalStorage: undefined,
+    } as any;
+
+    const error = new Error('DO async error');
+    const handler = vi.fn().mockRejectedValue(error);
+    const options = {
+      origin: 'auto.faas.cloudflare.durable_object',
+      options: {},
+      context,
+    };
+
+    const wrapped = wrapMethodWithSentry(options, handler);
+
+    await expect(wrapped()).rejects.toThrow('DO async error');
+    // Teardown is registered via waitUntil
+    expect(waitUntil).toHaveBeenCalled();
+    // Flush is called as part of that teardown
+    expect(mocks.flush).toHaveBeenCalledWith(2000);
+  });
+
+  it('DO sync method error path registers teardown via waitUntil', async () => {
+    const waitUntil = vi.fn();
+    const context = {
+      waitUntil,
+      storage: {} as any,
+      originalStorage: undefined,
+    } as any;
+
+    const error = new Error('DO sync error');
+    const handler = vi.fn().mockImplementation(() => {
+      throw error;
+    });
+    const options = {
+      origin: 'auto.faas.cloudflare.durable_object',
+      options: {},
+      context,
+    };
+
+    const wrapped = wrapMethodWithSentry(options, handler);
+
+    await expect(async () => wrapped()).rejects.toThrow('DO sync error');
+    // Teardown is registered via waitUntil
+    expect(waitUntil).toHaveBeenCalled();
+    // Flush is called as part of that teardown
+    expect(mocks.flush).toHaveBeenCalledWith(2000);
+  });
+});
