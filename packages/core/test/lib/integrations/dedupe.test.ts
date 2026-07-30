@@ -1,4 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { afterEach, describe, expect, it } from 'vitest';
+import { setAsyncContextStrategy } from '../../../src/asyncContext';
+import { getDefaultCurrentScope, getDefaultIsolationScope } from '../../../src/defaultScopes';
+import { withIsolationScope, withScope } from '../../../src/currentScopes';
+import type { Scope } from '../../../src/scope';
 import { _shouldDropEvent, dedupeIntegration } from '../../../src/integrations/dedupe';
 import type { Event as SentryEvent } from '../../../src/types/event';
 import type { Exception } from '../../../src/types/exception';
@@ -205,6 +210,102 @@ describe('Dedupe', () => {
       ).not.toBeNull();
       expect(integration.processEvent?.(clone(exceptionEvent), {}, {} as any)).toBeNull();
       expect(integration.processEvent?.(clone(exceptionEvent), {}, {} as any)).toBeNull();
+    });
+
+    describe('onlyWithinInvocation', () => {
+      afterEach(() => {
+        // Restore the default (stack-based) strategy so other tests are unaffected
+        setAsyncContextStrategy(undefined);
+      });
+
+      // Install an AsyncLocalStorage-backed strategy so `withIsolationScope` yields
+      // a genuinely fresh isolation scope per call, mirroring the serverless runtimes
+      // this option is meant for.
+      function useAlsStrategy(): void {
+        const asyncStorage = new AsyncLocalStorage<{ scope: Scope; isolationScope: Scope }>();
+        const getScopes = (): { scope: Scope; isolationScope: Scope } =>
+          asyncStorage.getStore() ?? { scope: getDefaultCurrentScope(), isolationScope: getDefaultIsolationScope() };
+
+        setAsyncContextStrategy({
+          withScope: callback => {
+            const scope = getScopes().scope.clone();
+            return asyncStorage.run({ scope, isolationScope: getScopes().isolationScope }, () => callback(scope));
+          },
+          withSetScope: (scope, callback) =>
+            asyncStorage.run({ scope, isolationScope: getScopes().isolationScope.clone() }, () => callback(scope)),
+          withIsolationScope: callback =>
+            asyncStorage.run({ scope: getScopes().scope, isolationScope: getScopes().isolationScope.clone() }, () =>
+              callback(getScopes().isolationScope),
+            ),
+          withSetIsolationScope: (isolationScope, callback) =>
+            asyncStorage.run({ scope: getScopes().scope, isolationScope }, () => callback(isolationScope)),
+          getCurrentScope: () => getScopes().scope,
+          getIsolationScope: () => getScopes().isolationScope,
+        });
+      }
+
+      it('still drops errors that repeat within one invocation', () => {
+        useAlsStrategy();
+        const integration = dedupeIntegration({ onlyWithinInvocation: true });
+
+        withIsolationScope(() => {
+          expect(integration.processEvent?.(clone(exceptionEvent), {}, {} as any)).not.toBeNull();
+          expect(integration.processEvent?.(clone(exceptionEvent), {}, {} as any)).toBeNull();
+          expect(integration.processEvent?.(clone(exceptionEvent), {}, {} as any)).toBeNull();
+        });
+      });
+
+      // How a request handler is wrapped: the isolation scope is forked per invocation
+      // while the current scope is inherited from the surrounding context.
+      it('does not drop the same error across forked isolation scopes', () => {
+        useAlsStrategy();
+        const integration = dedupeIntegration({ onlyWithinInvocation: true });
+
+        for (let i = 0; i < 3; i++) {
+          withIsolationScope(() => {
+            expect(integration.processEvent?.(clone(exceptionEvent), {}, {} as any)).not.toBeNull();
+          });
+        }
+      });
+
+      // How a Durable Object RPC method is wrapped: the current scope is forked per call
+      // while the isolation scope is shared by every call into that object. Keying on the
+      // isolation scope alone would report only the first call's error.
+      it('does not drop the same error across forked current scopes', () => {
+        useAlsStrategy();
+        const integration = dedupeIntegration({ onlyWithinInvocation: true });
+
+        withIsolationScope(() => {
+          for (let i = 0; i < 3; i++) {
+            withScope(() => {
+              expect(integration.processEvent?.(clone(exceptionEvent), {}, {} as any)).not.toBeNull();
+            });
+          }
+        });
+      });
+
+      it('keeps concurrent invocations out of each other comparisons', async () => {
+        useAlsStrategy();
+        const integration = dedupeIntegration({ onlyWithinInvocation: true });
+
+        // Interleave two invocations so each sees the other's event in between its own.
+        const invocation = async (): Promise<Array<SentryEvent | null>> =>
+          withIsolationScope(async () => {
+            const results = [integration.processEvent?.(clone(exceptionEvent), {}, {} as any) ?? null];
+            await new Promise(resolve => setTimeout(resolve, 10));
+            results.push(integration.processEvent?.(clone(exceptionEvent), {}, {} as any) ?? null);
+            return results;
+          });
+
+        const [first, second] = await Promise.all([invocation(), invocation()]);
+
+        // Each invocation reports its first error and dedupes its own repeat, regardless
+        // of what the other invocation captured in between.
+        expect(first?.[0]).not.toBeNull();
+        expect(first?.[1]).toBeNull();
+        expect(second?.[0]).not.toBeNull();
+        expect(second?.[1]).toBeNull();
+      });
     });
   });
 });

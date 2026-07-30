@@ -1,5 +1,7 @@
 import { DEBUG_BUILD } from '../debug-build';
 import { defineIntegration } from '../integration';
+import { getCurrentScope, getIsolationScope } from '../currentScopes';
+import type { Scope } from '../scope';
 import type { Event } from '../types/event';
 import type { Exception } from '../types/exception';
 import type { IntegrationFn } from '../types/integration';
@@ -9,8 +11,41 @@ import { getFramesFromEvent } from '../utils/stacktrace';
 
 const INTEGRATION_NAME = 'Dedupe' as const;
 
-const _dedupeIntegration = (() => {
+interface DedupeOptions {
+  /**
+   * Only drop errors that repeat within the same invocation.
+   *
+   * By default the integration drops any error identical to the previously captured one,
+   * no matter when it occurred. That assumes the client is as short-lived as the work it
+   * reports on. On a client shared across invocations (e.g. a cached serverless client)
+   * it no longer holds: the same error thrown by two separate requests is reported only
+   * once, because the second looks like a repeat of the first.
+   *
+   * With this enabled the previous event is remembered against the scopes that were
+   * active when it was captured, so a new invocation starts from a clean slate and only
+   * a genuine repeat inside one invocation is dropped.
+   *
+   * @default false
+   */
+  onlyWithinInvocation?: boolean;
+}
+
+const _dedupeIntegration = ((options: DedupeOptions = {}) => {
   let previousEvent: Event | undefined;
+
+  /**
+   * Per-invocation mode: the previous event, remembered against the scope pair that was
+   * active when it was captured, as `isolation scope -> current scope -> event`.
+   *
+   * Both scopes are needed because wrappers fork different ones, and neither is on its own
+   * fresh per invocation. A request handler forks the isolation scope and inherits the
+   * ambient current scope; an RPC/method wrapper forks the current scope and inherits the
+   * isolation scope from the object handling the call. Keying on the pair means either kind
+   * of fork starts a new invocation, and — since a fork is unique to its invocation —
+   * concurrent invocations cannot overwrite each other's entry. `WeakMap`s also let a
+   * finished invocation's event be collected with its scopes.
+   */
+  const previousEventByScopes = new WeakMap<Scope, WeakMap<Scope, Event>>();
 
   return {
     name: INTEGRATION_NAME,
@@ -23,6 +58,25 @@ const _dedupeIntegration = (() => {
 
       // Juuust in case something goes wrong
       try {
+        if (options.onlyWithinInvocation) {
+          const currentScope = getCurrentScope();
+          const isolationScope = getIsolationScope();
+
+          let previousEventByCurrentScope = previousEventByScopes.get(isolationScope);
+          if (!previousEventByCurrentScope) {
+            previousEventByCurrentScope = new WeakMap();
+            previousEventByScopes.set(isolationScope, previousEventByCurrentScope);
+          }
+
+          if (_shouldDropEvent(currentEvent, previousEventByCurrentScope.get(currentScope))) {
+            DEBUG_BUILD && debug.warn('Event dropped due to being a duplicate of previously captured event.');
+            return null;
+          }
+
+          previousEventByCurrentScope.set(currentScope, currentEvent);
+          return currentEvent;
+        }
+
         if (_shouldDropEvent(currentEvent, previousEvent)) {
           DEBUG_BUILD && debug.warn('Event dropped due to being a duplicate of previously captured event.');
           return null;
