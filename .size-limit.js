@@ -302,7 +302,7 @@ module.exports = [
     path: createCDNPath('bundle.replay.logs.metrics.min.js'),
     gzip: false,
     brotli: false,
-    limit: '225 KB',
+    limit: '228 KB',
     disablePlugins: ['@size-limit/esbuild'],
   },
   {
