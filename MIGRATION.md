@@ -34,7 +34,7 @@ Version 11 of the Sentry SDK has new compatibility ranges for runtimes and frame
 
 **Node.js:** The minimum supported Node.js version is now **20.19.0**. Node.js 18 is no longer supported.
 
-**Deno:** The minimum supported Deno version is now **2.8.3**.
+**Deno:** The minimum supported Deno version is now **2.8.2**.
 
 **Browsers:** Support for **Safari 14** was dropped. Sentry now requires Safari 15 or higher. For the rest of the browser support matrix, refer to the [Sentry docs](https://docs.sentry.io/platforms/javascript/#browser-support).
 
@@ -251,7 +251,6 @@ Affected SDKs: All SDKs.
 - The `http.query` and `http.fragment` span attributes were renamed to `url.query` and `url.fragment`.
 - `network.*` span attributes were aligned across SDKs.
 - Legacy messaging (`messaging.*`) and database (`db.statement`, …) span attributes on the AMQP and Redis instrumentations were replaced by their current semantic-convention equivalents.
-- The gen_ai cache token attributes `gen_ai.usage.cache_creation_input_tokens` and `gen_ai.usage.cache_read_input_tokens` were renamed to `gen_ai.usage.cache_creation.input_tokens` and `gen_ai.usage.cache_read.input_tokens`.
 - Span attributes now use the shared `@sentry/conventions` package under the hood.
 
 If you reference these attributes in custom instrumentation, `beforeSendSpan`, dashboards, or alerts, update them to the new names.
@@ -304,6 +303,7 @@ Affected SDKs: `@sentry/cloudflare`.
 
 - The internal, deprecated `addAutoIpAddressToUser` export was removed.
 - The `createSpanEnvelope` function and the `SpanEnvelope` / `SpanItem` types were removed. They existed only to send standalone (v1) spans as their own segment envelope, which the SDK no longer does. Standalone spans are gone; spans are sent either on their transaction or, with span streaming, as streamed spans (`StreamedSpanEnvelope`).
+- The `disableInstrumentationWarnings` option and the `MissingInstrumentationContext` type were removed. Now that instrumentation is channel-based, the SDK can no longer detect the "you imported a framework before `Sentry.init()`" case, so the warning it gated and the context it attached no longer exist.
 - The deprecated `sendDefaultPii` option was removed. Use [`dataCollection`](#senddefaultpii-is-replaced-by-datacollection) instead.
 - The `_experiments.enableMetrics` and `_experiments.beforeSendMetric` options were removed, use the top-level `enableMetrics` and `beforeSendMetric` options instead.
 
@@ -396,6 +396,8 @@ Sentry.init({
 - The deprecated `prismaInstrumentation` option was removed. It was no longer used, as Prisma works out of the box.
 - The `registerEsmLoaderHooks` option was removed. All instrumentation is now channel-based (via `@sentry/server-utils`), so the SDK no longer registers `import-in-the-middle` ESM loader hooks and the option no longer had any effect.
 - The deprecated `SentryHttpInstrumentation` and `SentryNodeFetchInstrumentation` exports were removed. Use `instrumentHttpOutgoingRequests()` and the `nativeNodeFetchIntegration` respectively.
+- The `generateInstrumentOnce` export was removed (from `@sentry/node` and the framework SDKs that re-exported it). It wrapped OpenTelemetry's `registerInstrumentations` and is no longer needed now that instrumentation is channel-based.
+- The `@sentry/node/loader` entry point was removed. It only re-exported the `import-in-the-middle` ESM `load`/`resolve` hooks, which are unused now that Node's `--loader` flag is obsolete (minimum Node is 20.19.0) and instrumentation is channel-based. Use `node --import @sentry/node/import` instead.
 - (Fastify) The deprecated `setShouldHandleError` method was removed.
 - (AWS Lambda) The deprecated `disableAwsContextPropagation` option was removed. It no longer had any effect.
 - (AWS Lambda) The deprecated `startTrace` option was removed. It no longer had any effect; to disable tracing, set `tracesSampleRate` to `0`.

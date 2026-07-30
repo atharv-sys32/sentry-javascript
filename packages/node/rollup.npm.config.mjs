@@ -1,5 +1,6 @@
 import replace from '@rollup/plugin-replace';
-import { makeBaseNPMConfig, makeNPMConfigVariants, makeOtelLoaders } from '@sentry-internal/rollup-utils';
+import { defineConfig } from 'rollup';
+import { makeBaseNPMConfig, makeNPMConfigVariants } from '@sentry-internal/rollup-utils';
 import { createWorkerCodeBuilder } from './rollup.anr-worker.config.mjs';
 
 const [anrWorkerConfig, getAnrBase64Code] = createWorkerCodeBuilder(
@@ -13,12 +14,16 @@ const [localVariablesWorkerConfig, getLocalVariablesBase64Code] = createWorkerCo
 );
 
 export default [
-  // `injectDiagnosticsChannel` makes the generated `@sentry/node/import` hook
-  // also register the diagnostics-channel injection, so `node --import
-  // @sentry/node/import app.js` injects the channels unconditionally (they are
-  // only subscribed to when the app opts in via
-  // `experimentalUseDiagnosticsChannelInjection()`).
-  ...makeOtelLoaders('./build', 'otel', { injectDiagnosticsChannel: true }),
+  // The `@sentry/node/import` entry (`node --import @sentry/node/import app.js`). A hand-written
+  // `.mjs` shim that registers the orchestrion diagnostics-channel injection before the app loads.
+  // We pass it through rollup only to copy it into `build/` at the path the package.json `exports`
+  // map expects; `external: /.*/` keeps the bare `@sentry/server-utils/orchestrion/import-hook`
+  // specifier as a runtime resolution against the installed package.
+  defineConfig({
+    input: 'src/import-hook.mjs',
+    external: /.*/,
+    output: { format: 'esm', file: 'build/import-hook.mjs' },
+  }),
   // The workers need to be built first since their output is copied into the main bundle.
   anrWorkerConfig,
   localVariablesWorkerConfig,
