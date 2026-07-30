@@ -266,6 +266,7 @@ export interface BrowserTracingOptions {
    */
   _experiments: Partial<{
     enableInteractions: boolean;
+    enableSoftNavWebVitals: boolean;
   }>;
 
   /**
@@ -346,7 +347,7 @@ export const browserTracingIntegration = ((options: Partial<BrowserTracingOption
     enableInp,
     enableLongTask,
     enableLongAnimationFrame,
-    _experiments: { enableInteractions },
+    _experiments: { enableInteractions, enableSoftNavWebVitals },
     beforeStartSpan,
     idleTimeout,
     finalTimeout,
@@ -640,6 +641,7 @@ export const browserTracingIntegration = ((options: Partial<BrowserTracingOption
         client.addIntegration(
           webVitalsIntegration({
             ignore: enableInp ? [] : ['inp'],
+            reportSoftNavs: enableSoftNavWebVitals,
           }),
         );
       }
