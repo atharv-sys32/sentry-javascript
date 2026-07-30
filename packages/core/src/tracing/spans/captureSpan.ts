@@ -20,8 +20,7 @@ import {
   streamedSpanJsonToSerializedSpan,
 } from '../../utils/spanUtils';
 import { getCapturedScopesOnSpan } from '../utils';
-import { isStaticBeforeSendSpanCallback, isStreamedBeforeSendSpanCallback } from './beforeSendSpan';
-import { hasSpanStreamingEnabled } from './hasSpanStreamingEnabled';
+import { isStaticBeforeSendSpanCallback } from './beforeSendSpan';
 import { scopeContextsToSpanAttributes } from './scopeContextAttributes';
 import { spanJsonToStreamedSpanJson, streamedSpanJsonToSpanJson } from './spanJsonToStreamedSpan';
 import { DEFAULT_ENVIRONMENT } from '../../constants';
@@ -161,14 +160,14 @@ function applyCommonSpanAttributes(
  * TODO(v12): Remove the v1 and static callback conversion shenanigans once we drop transactions.
  */
 function applyBeforeSendSpan(span: StreamedSpanJSON, client: Client): StreamedSpanJSON {
-  const { beforeSendSpan } = client.getOptions();
+  const { beforeSendSpan, traceLifecycle } = client.getOptions();
 
   if (!beforeSendSpan) {
     return span;
   }
 
-  if (hasSpanStreamingEnabled(client)) {
-    return isStreamedBeforeSendSpanCallback(beforeSendSpan) ? applyBeforeSendSpanCallback(span, beforeSendSpan) : span;
+  if (traceLifecycle === 'stream') {
+    return !isStaticBeforeSendSpanCallback(beforeSendSpan) ? applyBeforeSendSpanCallback(span, beforeSendSpan) : span;
   }
 
   return isStaticBeforeSendSpanCallback(beforeSendSpan)
