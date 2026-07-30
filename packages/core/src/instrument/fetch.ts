@@ -47,7 +47,7 @@ export function addFetchEndInstrumentationHandler(handler: (data: HandlerDataFet
 }
 
 function instrumentFetch(onFetchResolved?: (response: Response) => void, skipNativeFetchCheck: boolean = false): void {
-  if (skipNativeFetchCheck && !supportsNativeFetch()) {
+  if (!skipNativeFetchCheck && !supportsNativeFetch()) {
     return;
   }
 

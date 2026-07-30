@@ -1,4 +1,5 @@
 import * as Sentry from '@sentry/nextjs';
+import { bunServerIntegration, fetchIntegration } from '@sentry/bun';
 
 Sentry.init({
   traceLifecycle: 'static',
@@ -8,4 +9,8 @@ Sentry.init({
   tracesSampleRate: 1.0,
   dataCollection: { userInfo: true },
   tracePropagationTargets: ['http://localhost:3030/propagation/test-outgoing-fetch/check'],
+  integrations: [
+    // Adding bun-specific integration here
+    fetchIntegration(),
+  ],
 });
