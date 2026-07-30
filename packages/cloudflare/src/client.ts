@@ -1,5 +1,12 @@
 import type { ClientOptions, Options, ServerRuntimeClientOptions } from '@sentry/core';
-import { applySdkMetadata, debug, ServerRuntimeClient, spanIsSampled } from '@sentry/core';
+import {
+  _INTERNAL_flushLogsBuffer,
+  _INTERNAL_flushMetricsBuffer,
+  applySdkMetadata,
+  debug,
+  ServerRuntimeClient,
+  spanIsSampled,
+} from '@sentry/core';
 import { DEBUG_BUILD } from './debug-build';
 import type { ExecutionContextCompat } from './executionContext';
 import type { makeFlushLock } from './flush';
@@ -21,6 +28,13 @@ export class CloudflareClient extends ServerRuntimeClient {
   private _unsubscribeSpanEnd: (() => void) | null = null;
 
   /**
+   * Whether this client is a cached, cross-invocation client (experimental.cacheClient).
+   * Cached clients are never disposed at an invocation boundary, so their spans/events
+   * are delivered eagerly instead of waiting for a per-invocation flush.
+   */
+  public readonly isCachedClient: boolean;
+
+  /**
    * Creates a new Cloudflare SDK instance.
    * @param options Configuration options for this SDK.
    */
@@ -40,41 +54,55 @@ export class CloudflareClient extends ServerRuntimeClient {
 
     super(clientOptions);
     this._flushLock = flushLock;
+    this.isCachedClient = options.experimental?.cacheClient === true;
 
-    // Track span lifecycle to know when to flush
-    this._unsubscribeSpanStart = this.on('spanStart', span => {
-      const spanId = span.spanContext().spanId;
-      DEBUG_BUILD && debug.log('[CloudflareClient] Span started:', spanId);
+    if (this.isCachedClient) {
+      this.on('afterEnvelope', () => {
+        void this.getTransport()?.flush(2000);
+      });
+      this._setupEagerLogAndMetricDelivery();
+    }
 
-      // Negatively sampled spans never emit spanEnd,
-      // so tracking them would cause _pendingSpans to grow unboundedly.
-      // We should fix the inconsistent behavior for NonRecordingSpans in the future but
-      // for now, we just ignore them.
-      if (!spanIsSampled(span)) {
-        return;
-      }
+    // Track span lifecycle to know when to flush. Skipped for cached clients
+    // (experimental.cacheClient): they are never disposed, so spans that end after
+    // a flush are still delivered. Per-invocation clients are disposed right after
+    // the boundary flush, so the flush must wait for open spans to end — otherwise
+    // their transaction never gets emitted.
+    if (!this.isCachedClient) {
+      this._unsubscribeSpanStart = this.on('spanStart', span => {
+        const spanId = span.spanContext().spanId;
+        DEBUG_BUILD && debug.log('[CloudflareClient] Span started:', spanId);
 
-      this._pendingSpans.add(spanId);
+        // Negatively sampled spans never emit spanEnd,
+        // so tracking them would cause _pendingSpans to grow unboundedly.
+        // We should fix the inconsistent behavior for NonRecordingSpans in the future but
+        // for now, we just ignore them.
+        if (!spanIsSampled(span)) {
+          return;
+        }
 
-      if (!this._spanCompletionPromise) {
-        this._spanCompletionPromise = new Promise(resolve => {
-          this._resolveSpanCompletion = resolve;
-        });
-      }
-    });
+        this._pendingSpans.add(spanId);
 
-    this._unsubscribeSpanEnd = this.on('spanEnd', span => {
-      const spanId = span.spanContext().spanId;
-      DEBUG_BUILD && debug.log('[CloudflareClient] Span ended:', spanId);
-      this._pendingSpans.delete(spanId);
+        if (!this._spanCompletionPromise) {
+          this._spanCompletionPromise = new Promise(resolve => {
+            this._resolveSpanCompletion = resolve;
+          });
+        }
+      });
 
-      // If no more pending spans, resolve the completion promise
-      if (this._pendingSpans.size === 0 && this._resolveSpanCompletion) {
-        DEBUG_BUILD && debug.log('[CloudflareClient] All spans completed, resolving promise');
-        this._resolveSpanCompletion();
-        this._resetSpanCompletionPromise();
-      }
-    });
+      this._unsubscribeSpanEnd = this.on('spanEnd', span => {
+        const spanId = span.spanContext().spanId;
+        DEBUG_BUILD && debug.log('[CloudflareClient] Span ended:', spanId);
+        this._pendingSpans.delete(spanId);
+
+        // If no more pending spans, resolve the completion promise
+        if (this._pendingSpans.size === 0 && this._resolveSpanCompletion) {
+          DEBUG_BUILD && debug.log('[CloudflareClient] All spans completed, resolving promise');
+          this._resolveSpanCompletion();
+          this._resetSpanCompletionPromise();
+        }
+      });
+    }
   }
 
   /**
@@ -87,6 +115,9 @@ export class CloudflareClient extends ServerRuntimeClient {
    * @return {Promise<boolean>} A promise that resolves to a boolean indicating whether the flush operation was successful.
    */
   public async flush(timeout?: number): Promise<boolean> {
+    // Wait for user waitUntil-registered work to settle before draining, so events
+    // captured in that work are still in the buffer. Without this the final flush
+    // can drain (and the client be disposed) before background captures land.
     if (this._flushLock) {
       await this._flushLock.finalize();
     }
@@ -147,6 +178,37 @@ export class CloudflareClient extends ServerRuntimeClient {
     this._pendingSpans.clear();
     this._spanCompletionPromise = null;
     this._resolveSpanCompletion = null;
+  }
+
+  /**
+   * Turns log and metric captures into envelopes without waiting for a flush.
+   *
+   * Unlike events, logs and metrics batch client-side and only become an envelope when
+   * their buffer is drained. The idle drain timer is disabled for this runtime
+   * (`_flushInterval: 0`), and a cached client never reaches an invocation-boundary
+   * `flush()`, so without this a captured log or metric is never delivered at all.
+   *
+   * The buffers are drained directly rather than via `emit('flush')`, which would also
+   * flush an opt-in span buffer mid-invocation and fragment span segments. Draining is
+   * debounced to a microtask so a synchronous burst (e.g. a loop of `logger` calls)
+   * still produces a single envelope.
+   */
+  private _setupEagerLogAndMetricDelivery(): void {
+    let scheduled = false;
+    const scheduleDrain = (): void => {
+      if (scheduled) {
+        return;
+      }
+      scheduled = true;
+      queueMicrotask(() => {
+        scheduled = false;
+        _INTERNAL_flushLogsBuffer(this);
+        _INTERNAL_flushMetricsBuffer(this);
+      });
+    };
+
+    this.on('afterCaptureLog', scheduleDrain);
+    this.on('afterCaptureMetric', scheduleDrain);
   }
 }
 
@@ -253,6 +315,39 @@ interface BaseCloudflareOptions {
    * @default false
    */
   instrumentPrototypeMethods?: boolean | string[];
+
+  /**
+   * Experimental options for the Cloudflare SDK.
+   */
+  experimental?: {
+    /**
+     * Cache the client and reuse it across invocations within the same isolate.
+     *
+     * When enabled, the SDK creates a single client per unique options set and
+     * reuses it for all requests/DO handlers in that isolate. This avoids the
+     * per-invocation cost of constructing a new client, and it is what makes
+     * Durable Object telemetry reliable: a per-invocation client is disposed at
+     * the end of the handler, and in a Durable Object there is no `waitUntil`
+     * boundary that reliably extends execution, so spans/events that end after
+     * disposal would otherwise be lost.
+     *
+     * Since a cached client outlives any single invocation, delivery cannot rely
+     * on end-of-invocation flushes. With this enabled, captured events are flushed
+     * eagerly as they are captured, so data captured in detached/background work
+     * is still delivered.
+     *
+     * **Note:** Because a shared client also shares integration state, the dedupe
+     * integration is scoped to a single invocation. The same error in two separate
+     * invocations is reported each time, matching the uncached behavior, rather than
+     * the second being dropped as a repeat of the first.
+     *
+     * When disabled (default), a new client is created per invocation and disposed
+     * after the handler completes.
+     *
+     * @default false
+     */
+    cacheClient?: boolean;
+  };
 }
 
 /**

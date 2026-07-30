@@ -6,6 +6,15 @@
 
 Work in this release was contributed by @psh4607, @trinitiwowka, @nehaprasad-dev, and @JealousGx. Thank you for your contributions!
 
+- feat(cloudflare): Add `experimental.cacheClient` to reuse one client across invocations ([#TODO](https://github.com/getsentry/sentry-javascript/pull/TODO)). Opting in reuses a single client per isolate instead of building and disposing one per invocation, which removes that per-invocation cost and makes Durable Object telemetry reliable: a Durable Object has no `waitUntil` boundary that dependably extends execution, so with a per-invocation client anything captured after the handler returned was lost. Since a reused client never reaches an end-of-invocation flush, captured data is delivered eagerly instead.
+
+  ```js
+  Sentry.init({
+    dsn: env.SENTRY_DSN,
+    experimental: { cacheClient: true },
+  });
+  ```
+
 - fix(cloudflare): Stop Durable Object scope data leaking between invocations ([#TODO](https://github.com/getsentry/sentry-javascript/pull/TODO)). Instrumented Durable Object methods forked only the current scope, while `setUser`/`setTag` write to the isolation scope — which a Durable Object keeps across invocations. A user set while handling one invocation could therefore be attached to later invocations' events in the same isolate.
 
 - feat(deno)!: Rename several default integrations to match the other SDKs ([#22404](https://github.com/getsentry/sentry-javascript/pull/22404)). The `deno*Integration` exports are kept as deprecated aliases. If you were relying on the names (for example, to disable them), then note that these have changed:

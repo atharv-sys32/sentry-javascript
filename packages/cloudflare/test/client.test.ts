@@ -220,6 +220,52 @@ describe('CloudflareClient', () => {
     });
   });
 
+  describe('flush()', () => {
+    it('calls transport flush with the given timeout', async () => {
+      const client = new CloudflareClient(MOCK_CLIENT_OPTIONS);
+
+      const privateClient = client as unknown as {
+        _transport: { flush: ReturnType<typeof vi.fn> };
+      };
+
+      await client.flush(3000);
+
+      expect(privateClient._transport.flush).toHaveBeenCalledWith(3000);
+    });
+
+    it('resolves with the transport flush result', async () => {
+      const client = new CloudflareClient(MOCK_CLIENT_OPTIONS);
+
+      const result = await client.flush(1000);
+
+      expect(result).toBe(true);
+    });
+
+    it('waits for the flush lock before draining the transport', async () => {
+      let releaseLock!: () => void;
+      const finalize = vi.fn(() => new Promise<void>(resolve => (releaseLock = resolve)));
+      const client = new CloudflareClient({
+        ...MOCK_CLIENT_OPTIONS,
+        flushLock: { ready: Promise.resolve(), finalize },
+      });
+
+      const privateClient = client as unknown as {
+        _transport: { flush: ReturnType<typeof vi.fn> };
+      };
+
+      const flushPromise = client.flush(1000);
+
+      // The transport must not drain while the lock is pending
+      await Promise.resolve();
+      expect(finalize).toHaveBeenCalled();
+      expect(privateClient._transport.flush).not.toHaveBeenCalled();
+
+      releaseLock();
+      await flushPromise;
+      expect(privateClient._transport.flush).toHaveBeenCalledWith(1000);
+    });
+  });
+
   describe('span lifecycle tracking', () => {
     it('tracks pending spans when spanStart is emitted', () => {
       const client = new CloudflareClient(MOCK_CLIENT_OPTIONS);
@@ -331,6 +377,31 @@ describe('CloudflareClient', () => {
       // Emit spanStart after dispose - should not be tracked
       client.emit('spanStart', mockSpan as any);
       expect(privateClient._pendingSpans.has('test-span-id')).toBe(false);
+    });
+
+    it('does not track spans when cacheClient is enabled', async () => {
+      const client = new CloudflareClient({
+        ...MOCK_CLIENT_OPTIONS,
+        experimental: { cacheClient: true },
+      });
+
+      const privateClient = client as unknown as {
+        _pendingSpans: Set<string>;
+        _unsubscribeSpanStart: (() => void) | null;
+        _unsubscribeSpanEnd: (() => void) | null;
+      };
+
+      // Span tracking is disabled for cached clients — flush must not wait
+      expect(privateClient._unsubscribeSpanStart).toBeNull();
+      expect(privateClient._unsubscribeSpanEnd).toBeNull();
+
+      const mockSpan = {
+        spanContext: () => ({ spanId: 'test-span-id', traceFlags: TRACE_FLAG_SAMPLED }),
+      };
+      client.emit('spanStart', mockSpan as any);
+
+      expect(privateClient._pendingSpans.size).toBe(0);
+      await expect(client.flush(10)).resolves.toBe(true);
     });
   });
 });
